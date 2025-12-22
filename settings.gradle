@@ -1,0 +1,5 @@
+rootProject.name = 'munova-dev'
+
+include 'munova-api'
+include 'munova-chat'
+include 'munova-chat-test'

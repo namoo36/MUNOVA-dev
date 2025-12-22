@@ -1,0 +1,46 @@
+package com.space.munovachat.rsocket.repository.r2dbc;
+
+import com.space.munovachat.rsocket.entity.ChatMember;
+import com.space.munovachat.rsocket.enums.ChatType;
+import com.space.munovachat.rsocket.enums.ChatUserType;
+import org.springframework.data.r2dbc.repository.Query;
+import org.springframework.data.repository.reactive.ReactiveCrudRepository;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+public interface ChatMemberRepository extends ReactiveCrudRepository<ChatMember, Long> {
+
+    @Query("""
+                SELECT cm.*
+                FROM chat_member cm
+                JOIN chat c ON cm.chat_id = c.chat_id
+                WHERE cm.member_id = :memberId
+                    AND c.product_id = :productId
+                    AND c.status = 'OPENED'
+                LIMIT 1
+            """)
+    Mono<ChatMember> findExistingChatRoom(Long memberId, Long productId);
+
+
+    @Query("""
+                SELECT cm.*
+                FROM chat_member cm
+                JOIN chat c ON cm.chat_id = c.chat_id
+                WHERE cm.chat_id = :chatId
+                    AND cm.member_id = :memberId
+                    AND c.type = :chatType
+                    AND cm.chat_member_type = :chatUserType
+            """)
+    Mono<ChatMember> findChatMember(Long chatId, Long memberId, ChatType chatType, ChatUserType chatUserType);
+
+    // 참여자 여부 확인 (메시지 전송/조회용)
+    @Query("""
+                SELECT COUNT(*) > 0 AS cnt
+                FROM chat_member cm
+                WHERE cm.chat_id = :chatId
+                    AND cm.member_id = :memberId
+            """)
+    Mono<Integer> existsMemberInChat(Long chatId, Long memberId);
+
+    Flux<ChatMember> findByChatId(Long chatId);
+}
