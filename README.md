@@ -66,13 +66,16 @@ https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
 #### 목표
 - 메시지 처리 비용을 제외한 상태에서 대규모 동시 접속 burst를 수용 가능한지 검증<br>
   (TCP 3-way handshake → HTTP Upgrade → STOMP CONNECTED)
-- 가정: 10초 내 15,000명 동시 접속 시도(≈ 1,500 conn/s)
+- 테스트 방식: 500 → 1,000 → 2,000 → 5,000 → 10,000 → 15,000명 동시 접속 독립적 발생, 각 구간에서 CONNECTED까지 도달하는 성공률과 초기 연결 지연 측정
+- 지표 설명:
+  - `ws_connecting`: TCP 3way handshake 연결 및 HTTP Upgrade 완료까지  시간
+  - `ws_connect_time`: WebSocket 연결 이후 STOMP 초기화가 완료될 때까지의 시간(CONNECTED 될 때까지의 시간)
 
 #### 문제 상황
-- __TCP 3way Handshake 실패 발생__
+- __TCP 3way Handshake 및 accept 단계 실패 발생__
   - burst 상황에서 WebSocket 연결 지연 급증 및 성공률 급락
   - 일부 연결은 STOMP `CONNECTED` 이전 단계에서 실패했고, OS 레벨 에러(`No file descriptors available`)가 관측됨
-    → 애플리케이션 로직 진입 이전(TCP accept/handshake 구간)에서 병목이 발생했다고 판단
+    → 애플리케이션 로직 진입 이전(TCP 3way handshake/accept 구간)에서 병목이 발생했다고 판단
 
 #### 접근 방식
 - __File descriptor(ulimit) 상향__
@@ -80,8 +83,9 @@ https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
     → 목표 동접(15,000) 및 JVM/프로세스 기본 사용량을 고려해 20,000으로 설정
 - __TCP backlog 확장 (SYN queue / accept queue)__
   - burst 상황에서 handshake 대기열이 부족해 drop이 발생 및 재전송으로 인한 지연 누적
-    → accept queue(=`somaxconn` 상한)은 1,500 conn/s 유입에서 순간 지연(accept 처리 지연/스파이크)을 1~2초 완충할 수 있도록 4,096으로 설정
-    → SYN queue(`tcp_max_syn_backlog`)는 RTT/재전송/혼잡의 변동성이 크므로 accept보다 보수적으로 8,192로 설정
+    → accept queue(=`somaxconn` 상한)은 일시적 지연 완충 해소를 위해 4,096으로 설정
+    → SYN queue(`tcp_max_syn_backlog`)는 네트워크 변동성을 고려해 8,192로 설정
+    (자세한 근거는 Wiki 참고)
 
 #### 결과
 - __개선 전__
@@ -92,13 +96,34 @@ https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
   
   <img width="630" height="350" alt="스크린샷 2025-12-24 153531" src="https://github.com/user-attachments/assets/03a7d2b2-fd85-481d-b579-119418c750bb" />
 
-  - `No file descriptors available` 에러 제거
-  - 모든 구간에서 성공률 개선 (5,000: 48% → 100%, 10,000: 30% → 96.7%, 15,000: 신규 측정 가능(92.5%))
-  - ws_connecting / ws_connect_time 유의미한 감소를 보여주었으나 10k~15k 구간에서 여전히 수 초로 병목 발생
+  - __`No file descriptors available` 에러 제거__
+  - __handshake 성공률 최대 3배 이상 개선__
+    - 5,000 VUs: 48% → 100% (+51.6%p, 약 2.1배)
+    - 10,000 VUs: 30% → 96.7% (+66.5%p, 약 3.2배)
+    - 15,000 VUs: 신규 측정 가능(92.5%)
+  - __초기 연결 지연 시간도 최대 79% 단축__
+    - 5,000 VUs 기준 `ws_connecting`(TCP handshake + accept + Upgrade): 11.42s → 2.39s (약 79% 감소)
+  - __10k~15k 구간 여전히 초 단위 지연 발생, 대기열(backlog) 부족 가능성 확인__
 
 - __TCP backlog(somaxconn / tcp_max_syn_backlog) 튜닝 결과__
 
-  - FD만 튜닝한 결과보다 성공률 증가
-  - ws_connecting, ws_connect_time 단축
-    5,000 VUs → ws_connecting: 2.39s → 1.15s, ws_connect_time: 3.63s → 1.67s
-    15,000 VUs → ws_connecting: 10.76s → 7.44s, iteration_duration p95: 24.93s → 17.71s
+  <img width="630" height="350" alt="스크린샷 2025-12-24 153531" src="https://github.com/user-attachments/assets/6eeee09f-08cd-4220-ae26-589dc86999d6" />
+
+  - __성공률 추가 개선__
+    - 10,000 VUs: 96.7% → 99.18% (+2.46%p)
+    - 15,000 VUs: 92.5% → 96.27% (+3.73%p)
+  - __handshake 지연 추가 단축__
+    - 5,000 VUs:
+      - `ws_connecting`(TCP → HTTP Upgrade): 2.39s → 1.15s (약 52% 감소)
+      - `ws_connect_time`(Websocket → STOMP CONNECTED): 3.63s → 1.67s (약 54% 감소)
+    - 15,000 VUs:
+      - `ws_connecting(avg)`(TCP → HTTP Upgrade): 10.76s → 7.44s (약 31% 감소)
+      - `ws_connect_time(avg)`(Websocket → STOMP CONNECTED): 15.056s → 10.382s (약 31% 감소)
+
+
+### 2️⃣ TCP WebSocket 연결 처리 한계 검증
+#### 목표
+
+#### 문제 상황
+
+
