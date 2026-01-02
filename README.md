@@ -24,8 +24,11 @@
 
 <br/><br/>
 
-### 📊 테스트 환경
+### 📊 테스트 환경 및 성능 목표
 <img width="630" height="350" alt="MUNOVA (1)" src="https://github.com/user-attachments/assets/d3dea3e8-bbde-4611-9581-27ed2f5adca4" />
+
+> 📖 자세한 설계 및 성능 테스트 내용은
+> [테스트 환경 및 성능 목표](https://github.com/namoo36/MUNOVA-dev/wiki/%EB%B6%80%ED%95%98%ED%85%8C%EC%8A%A4%ED%8A%B8-%EC%84%B1%EB%8A%A5-%EB%AA%A9%ED%91%9C-%EB%B0%8F-%ED%85%8C%EC%8A%A4%ED%8A%B8-%ED%99%98%EA%B2%BD)를 참고하세요.
 
 ---
 
