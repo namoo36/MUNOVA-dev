@@ -66,67 +66,69 @@ https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
 
 ## ⚒️ 채팅 기능 단계적 고도화
 ### 1️⃣ TCP WebSocket 연결 처리 한계 검증
-#### 목표
-- 메시지 처리 비용을 제외한 상태에서 대규모 동시 접속 burst를 수용 가능한지 검증<br>
-  (TCP 3-way handshake → HTTP Upgrade → STOMP CONNECTED)
-- 테스트 방식: 500 → 1,000 → 2,000 → 5,000 → 10,000 → 15,000명 동시 접속 독립적 발생, 각 구간에서 CONNECTED까지 도달하는 성공률과 초기 연결 지연 측정
-- 지표 설명:
-  - `ws_connecting`: TCP 3way handshake 연결 및 HTTP Upgrade 완료까지  시간
-  - `ws_connect_time`: WebSocket 연결 이후 STOMP 초기화가 완료될 때까지의 시간(CONNECTED 될 때까지의 시간)
+#### 1. 목표
+대규모 실시간 채팅 서비스를 가정하여, 메시지 처리 비용을 제외한 순수 WebSocket 연결 수립 및 유지 능력을 검증했습니다. OS 커널 → 네트워크 큐 → 애플리케이션 설정까지 연결 수립 단계별 병목을 분리 분석하고, 로컬 환경에서 15,000 VUs 동시 접속을 안정적으로 수립·유지하는 것을 목표로 테스트를 진행했습니다.
+> 본 테스트에서 테스트 환경 및 동시 접속자 수 산정 기준은 [⚙️ 테스트 환경 및 성능 목표](https://github.com/namoo36/MUNOVA-dev/wiki/%EB%B6%80%ED%95%98%ED%85%8C%EC%8A%A4%ED%8A%B8-%EC%84%B1%EB%8A%A5-%EB%AA%A9%ED%91%9C-%EB%B0%8F-%ED%85%8C%EC%8A%A4%ED%8A%B8-%ED%99%98%EA%B2%BD) 문서의 기준을 따릅니다.
+<br>
 
-#### 문제 상황
-- __TCP 3way Handshake 및 accept 단계 실패 발생__
-  - burst 상황에서 WebSocket 연결 지연 급증 및 성공률 급락
-  - 일부 연결은 STOMP `CONNECTED` 이전 단계에서 실패했고, OS 레벨 에러(`No file descriptors available`)가 관측됨
-    → 애플리케이션 로직 진입 이전(TCP 3way handshake/accept 구간)에서 병목이 발생했다고 판단
+#### 2. 문제 상황 및 접근
+__1) OS 레벨 — File Descriptor 한계__
+- __문제__: Burst 구간에서 `No file descriptors available` 에러 발생
+- __원인__: 신규 소켓에 대한 FD 할당 실패로 `accept()` 단계에서 연결 탈락
+- __조치__: `ulimit -n` 상향 (1,024 → 20,000)
 
-#### 접근 방식
-- __File descriptor(ulimit) 상향__
-  - 기존 `ulimit -n=512` 로 인해 `accept()` 단계에서 신규 소켓을 할당하지 못해 실패 발생
-    → 목표 동접(15,000) 및 JVM/프로세스 기본 사용량을 고려해 20,000으로 설정
-- __TCP backlog 확장 (SYN queue / accept queue)__
-  - burst 상황에서 handshake 대기열이 부족해 drop이 발생 및 재전송으로 인한 지연 누적
-    → accept queue(=`somaxconn` 상한)은 일시적 지연 완충 해소를 위해 4,096으로 설정
-    → SYN queue(`tcp_max_syn_backlog`)는 네트워크 변동성을 고려해 8,192로 설정
-    (자세한 근거는 Wiki 참고)
+__2) 네트워크 레벨 — TCP Backlog 병목__
+- __문제__: 초기 burst 트래픽에서 Handshake 지연 및 재전송 발생
+- __원인__: `SYN backlog`, `accept queue` 포화
+- __조치__: `net.core.somaxconn` 확장, `tcp_max_syn_backlog` 확장, `Tomcat acceptCount` 조정
 
-#### 결과
-- __개선 전__
+__3) 애플리케이션 레벨 — 동시 연결 상한__
+- __문제__: 연결 성공 수(succeeded)가 8,192에서 정체
+- __원인__: Tomcat 기본 `maxConnections=8192`
+- __조치__: `maxConnections`를 20,000으로 확장
 
-  <img width="630" height="350" alt="image" src="https://github.com/user-attachments/assets/0aad0b36-e92d-44da-ab66-a0e81995111e" />
-  
-- __FD(ulimit) 튜닝 결과__
-  
-  <img width="630" height="350" alt="스크린샷 2025-12-24 153531" src="https://github.com/user-attachments/assets/03a7d2b2-fd85-481d-b579-119418c750bb" />
+<br>
 
-  - __`No file descriptors available` 에러 제거__
-  - __handshake 성공률 최대 3배 이상 개선__
-    - 5,000 VUs: 48% → 100% (+51.6%p, 약 2.1배)
-    - 10,000 VUs: 30% → 96.7% (+66.5%p, 약 3.2배)
-    - 15,000 VUs: 신규 측정 가능(92.5%)
-  - __초기 연결 지연 시간도 최대 79% 단축__
-    - 5,000 VUs 기준 `ws_connecting`(TCP handshake + accept + Upgrade): 11.42s → 2.39s (약 79% 감소)
-  - __10k~15k 구간 여전히 초 단위 지연 발생, 대기열(backlog) 부족 가능성 확인__
+#### 3. 성능 개선 요약
+__1)TCP / Handshake 단계 성능 비교__
+- FD는 ‘연결 실패 제거’, TCP Backlog는 ‘지연 안정화’에 결정적 역할
 
-- __TCP backlog(somaxconn / tcp_max_syn_backlog) 튜닝 결과__
+| VUs        | 구분         | 연결 성공률 (`succeeded`) | `ws_connecting` 평균 | `ws_connect_time` 평균 |
+| ---------- | ---------- | -------------------- | ------------------ | -------------------- |
+| **5,000**  | 개선 전       | 48.36% (2,582)       | 11.42s             | 8.04s                |
+|            | FD 튜닝      | **100% (5,000)**     | **2.39s (-79%)**   | 3.63s                |
+|            | Backlog 튜닝 | **100% (5,000)**     | **1.15s (-51.9%)** | **1.68s**            |
+|            |            |                      |                    |                      |
+| **10,000** | 개선 전       | 30.18% (3,018)       | 13.26s             | 8.82s                |
+|            | FD 튜닝      | **96.72% (9,672)**   | **4.68s (-64.7%)** | 6.20s                |
+|            | Backlog 튜닝 | **99.18% (9,918)**   | **4.29s**          | **6.02s**            |
+|            |            |                      |                    |                      |
+| **15,000** | 개선 전       | 측정 불가                | -                  | -                    |
+|            | FD 튜닝      | 92.54% (13,882)      | 10.76s             | 15.06s               |
+|            | Backlog 튜닝 | **96.27% (14,441)**  | **7.44s (-30.9%)** | **10.38s**           |
 
-  <img width="630" height="350" alt="스크린샷 2025-12-24 153531" src="https://github.com/user-attachments/assets/6eeee09f-08cd-4220-ae26-589dc86999d6" />
+__2) WebSocket 동시 연결 유지 한계 비교__
+- 연결 유지 실패의 원인이 ‘WebSocket 구조’가 아닌 Tomcat 설정 상한(maxConnections)이었음을 확인
 
-  - __성공률 추가 개선__
-    - 10,000 VUs: 96.7% → 99.18% (+2.46%p)
-    - 15,000 VUs: 92.5% → 96.27% (+3.73%p)
-  - __handshake 지연 추가 단축__
-    - 5,000 VUs:
-      - `ws_connecting`(TCP → HTTP Upgrade): 2.39s → 1.15s (약 52% 감소)
-      - `ws_connect_time`(Websocket → STOMP CONNECTED): 3.63s → 1.67s (약 54% 감소)
-    - 15,000 VUs:
-      - `ws_connecting(avg)`(TCP → HTTP Upgrade): 10.76s → 7.44s (약 31% 감소)
-      - `ws_connect_time(avg)`(Websocket → STOMP CONNECTED): 15.056s → 10.382s (약 31% 감소)
+| VUs        | 구분   | 연결 성공률 (`succeeded`) | 세션 유지 시간 (`session_duration`) | 비고        |
+| ---------- | ---- | -------------------- | ----------------------------- | --------- |
+| **10,000** | 기본값  | 81.91% (8,191)       | 1m16s                         | 상한 도달     |
+|            | 확장 후 | **100% (10,000)**    | **1m30s**                     | 목표 달성     |
+|            |      |                      |                               |           |
+| **15,000** | 기본값  | 54.60% (8,191)       | 56.29s                        | 상한 고정     |
+|            | 확장 후 | **100% (15,000)**    | **1m30s**                     | 안정 유지     |
+|            |      |                      |                               |           |
+| **18,000** | 기본값  | 측정 불가                | -                             | -         |
+|            | 확장 후 | 90.81% (16,347)      | 1m21s                         | 리소스 한계 진입 |
 
+<br>
 
-### 2️⃣ TCP WebSocket 연결 처리 한계 검증
-#### 목표
+#### 4. 상세 분석(Wiki)
+각 단계별 상세 설정 값, 그래프, 로그 분석, 튜닝 근거는 아래 문서에서 확인할 수 있습니다. <br>
+➡️ [Phase 1. WebSocket(STOMP) 동시 접속 부하 테스트 분석](https://github.com/namoo36/MUNOVA-dev/wiki/Phase-1.-Websocket(STOMP)-%EB%8F%99%EC%8B%9C-%EC%A0%91%EC%86%8D-%EB%B6%80%ED%95%98-%ED%85%8C%EC%8A%A4%ED%8A%B8-%EB%B6%84%EC%84%9D) <br>
+➡️ [Full Report (Wiki)](https://github.com/namoo36/MUNOVA-dev/wiki) <br>
 
-#### 문제 상황
+<br> 
 
+### 1️⃣ TCP WebSocket 연결 처리 한계 검증
 
