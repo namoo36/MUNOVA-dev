@@ -75,17 +75,17 @@ https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
 __1) OS 레벨 — File Descriptor 한계__
 - __문제__: Burst 구간에서 `No file descriptors available` 에러 발생
 - __원인__: 신규 소켓에 대한 FD 할당 실패로 `accept()` 단계에서 연결 탈락
-- __조치__: `ulimit -n` 상향 (1,024 → 20,000)
+- __접근__: `ulimit -n` 상향 (1,024 → 20,000)
 
 __2) 네트워크 레벨 — TCP Backlog 병목__
 - __문제__: 초기 burst 트래픽에서 Handshake 지연 및 재전송 발생
 - __원인__: `SYN backlog`, `accept queue` 포화
-- __조치__: `net.core.somaxconn` 확장, `tcp_max_syn_backlog` 확장, `Tomcat acceptCount` 조정
+- __접근__: `net.core.somaxconn` 확장, `tcp_max_syn_backlog` 확장, `Tomcat acceptCount` 조정
 
 __3) 애플리케이션 레벨 — 동시 연결 상한__
 - __문제__: 연결 성공 수(succeeded)가 8,192에서 정체
 - __원인__: Tomcat 기본 `maxConnections=8192`
-- __조치__: `maxConnections`를 20,000으로 확장
+- __접근__: `maxConnections`를 20,000으로 확장
 
 <br>
 
@@ -125,8 +125,8 @@ __2) WebSocket 동시 연결 유지 한계 비교__
 
 #### 4. 상세 분석(Wiki)
 각 단계별 상세 설정 값, 그래프, 로그 분석, 튜닝 근거는 아래 문서에서 확인할 수 있습니다. <br>
-➡️ [Phase 1. WebSocket(STOMP) 동시 접속 부하 테스트 분석](https://github.com/namoo36/MUNOVA-dev/wiki/Phase-1.-Websocket(STOMP)-%EB%8F%99%EC%8B%9C-%EC%A0%91%EC%86%8D-%EB%B6%80%ED%95%98-%ED%85%8C%EC%8A%A4%ED%8A%B8-%EB%B6%84%EC%84%9D) <br>
-➡️ [Full Report (Wiki)](https://github.com/namoo36/MUNOVA-dev/wiki) <br>
+> ➡️ [Phase 1. WebSocket(STOMP) 동시 접속 부하 테스트 분석](https://github.com/namoo36/MUNOVA-dev/wiki/Phase-1.-Websocket(STOMP)-%EB%8F%99%EC%8B%9C-%EC%A0%91%EC%86%8D-%EB%B6%80%ED%95%98-%ED%85%8C%EC%8A%A4%ED%8A%B8-%EB%B6%84%EC%84%9D) <br>
+> ➡️ [Full Report (Wiki)](https://github.com/namoo36/MUNOVA-dev/wiki) <br>
 
 <br> 
 
@@ -163,28 +163,15 @@ __4) 접근__
 #### 3. 결과
 - `RSocket(Netty)` 구조 전환을 통해 동시 연결 수용 한계를 해소하고, 대규모 트래픽 환경에서도 안정적인 실시간 통신이 가능함을 수치로 검증했다.
 
-|   VUs | 항목                       | STOMP (WebSocket + Tomcat) | RSocket (Netty)         |
-| ----: | ------------------------ | -------------------------- | ----------------------- |
-| 1,000 | 요청/세션 성공률                | 100% (58,637/58,637)       | 100% (1,000/1,000)      |
-|       | 평균 API / Message Latency | 66.54 ms                   | 233.81 ms               |
-|       | Connect Time             | 14.45 ms                   | 0.194 ms                |
-|       | 처리 메시지 수                 | 58,637                     | 37,135 / 36,517         |
-|    |                       |                         |                      |
-| 1,500 | 요청/세션 성공률                | **58.64%** (실패 41.36%)     | **99.6%** (1,494/1,500) |
-|       | 평균 API / Message Latency | **3.14 s**                 | 478.85 ms               |
-|       | Connect Time             | 261.32 ms                  | 0.228 ms                |
-|       | 처리 메시지 수                 | 78,817 / 78,867            | 129,434 / 114,210       |
-|    |                       |                         |                      |
-| 2,000 | 요청/세션 성공률                | **21.02%** (실패 78.98%)     | **99.6%** (1,992/2,000) |
-|       | 평균 API / Message Latency | 106.98 ms                  | **7,697.79 ms**         |
-|       | Connect Time             | 91.56 ms                   | 0.109 ms                |
-|       | 처리 메시지 수                 | 116,135 / 116,135          | 129,583 / 64,706        |
-|    |                       |                         |                      |
-| 3,000 | 요청/세션 성공률                | 측정 불가                    | **99.6%** (2,988/3,000) |
-|       | 평균 Message Latency       | 측정 불가                           | 225.63 ms               |
-|       | Connect Time             | 측정 불가                         | 0.091 ms                |
-|       | 처리 메시지 수                 | 측정 불가                           | 238,815 / 160,558       |
-|       | E2E Startup              | -                        | 3,088 ms                |
+| 항목                  | STOMP (WebSocket + Tomcat)               | RSocket (Netty)     | 해석                           |
+| ------------------- | ---------------------------------------- | ------------------- | ---------------------------- |
+| 동시 연결 수용 한계         | **1,500 VUs부터 급격히 붕괴**                   | **3,000 VUs까지 안정적** | 스레드 기반 Tomcat 모델의 연결 수 한계    |
+| 요청 / 세션 성공률         | 1,500 VUs: **58%**<br>2,000 VUs: **21%** | 전 구간 **99.6% 이상**   | accept / worker thread 포화 제거 |
+| Connect Time        | 최대 **261 ms**                            | **0.1~0.2 ms**      | Netty EventLoop 기반 비동기 연결 처리 |
+| Message Latency 안정성 | 부하 증가 시 **초 단위 지연 발생**                   | 대부분 **수백 ms 이하 유지** | 큐잉 지연 및 context switching 감소 |
+| 고부하 환경 측정 가능 여부     | **3,000 VUs 측정 불가**                      | 정상 측정 가능            | 서버 리소스 고갈로 인한 테스트 중단 여부      |
+| E2E Startup         | -                                        | **약 3초**            | 대규모 연결 환경에서도 초기 기동 안정성 확보    |
+
 
 <br>
 
@@ -195,5 +182,58 @@ __4) 접근__
 
 <br>
 
-### 3️⃣ 
+### 3️⃣ RSocket 성능·아키텍처 개선
+
+#### 1. 목표
+`RSocket` + `WebFlux` + `Netty` 기반 구조에서 고부하 상황에서 발생한 메시지 지연 및 유실 문제를 개선하고, 확장 가능한 채팅 아키텍처를 설계 및 검증하는 것을 목표로 했습니다. 최대 3,000 VUs 환경에서 채팅방 생성 → 메시지 전송 → 저장 → 수신까지의 End-to-End 안정성 검증 및 적합한 채팅 인프라 구조를 결정하는 것을 목표로 테스트를 진행했습니다.
+
+> 본 테스트에서 테스트 환경 및 동시 접속자 수 산정 기준은 [⚙️ 테스트 환경 및 성능 목표](https://github.com/namoo36/MUNOVA-dev/wiki/%EB%B6%80%ED%95%98%ED%85%8C%EC%8A%A4%ED%8A%B8-%EC%84%B1%EB%8A%A5-%EB%AA%A9%ED%91%9C-%EB%B0%8F-%ED%85%8C%EC%8A%A4%ED%8A%B8-%ED%99%98%EA%B2%BD) 문서의 기준을 따릅니다.
+<br>
+
+#### 2. 문제 상황 및 접근
+__1) 고부하 환경에서 메시지 유실 및 지연 발생__
+- __문제__: 2,000 VUs 이상에서 메시지 전송 성공률 급감 및 메시지 지연 발생, 일부 TCP 연결 종료
+- __원인__: 메시지 저장(DB Write)과 전송 로직이 동일한 `EventLoop`에서 처리되면서 `flush` 지연 발생
+- __접근__: 메시지 저장과 전송 파이프라인 분리 + `WriteBufferWaterMark` 튜닝으로 순간 버스트 흡수 구간 확장
+
+__2) 단일 서버 인메모리 Fan-out 구조의 한계__
+- __문제__: 저사양 서버 배포 환경에서 3,000명 대상 메시지 `Fan-out` 시 `JOIN`, `CONNECT` 지연 폭발 및 메시지 전송 지연 증가
+- __원인__: 인메모리 구조에서 `EventLoop`가 모든 구독자를 순회하며 `writeAndFlush` 수행, 단일 스레드를 장시간 점유
+- __접근__: 메시지 `Fan-out` 책임을 외부 메시지 브로커로 위임
+
+__3) 스케일아웃 환경에서 메시지 동기화 불가__
+- __문제__: 서버를 2대 이상으로 확장 시 특정 서버에 연결된 사용자만 메시지 수신, 다른 서버에 연결된 사용자는 누락
+- __원인__: 세션 정보와 메시지 브로드캐스트가 서버 로컬 메모리에만 존재
+- __접근__: `RabbitMQ Fanout Exchange` 기반 메시지 브로커 도입
+
+<br>
+
+#### 3. 결과
+
+__1) EventLoop 병목 해소__
+
+| 항목              | 개선 전 (저장/전송 결합) | 개선 후 (분리 + 튜닝) | 해석                                |
+| --------------- | --------------- | -------------- | --------------------------------- |
+| E2E Startup     | 3~4초 수준         | 3초 내외 유지       | 구조 변경이 초기 연결 성능에 **부정적 영향 없음**    |
+| Message Latency | 최대 **7.6초**     | **10~70ms**    | DB I/O가 EventLoop를 점유하던 병목이 제거됨   |
+| 메시지 수신율         | **49~88%**      | **97~99%**     | 처리 지연으로 인한 메시지 드롭 현상 해소           |
+| 부하 증가 시 안정성     | VUs 증가 시 급격히 붕괴 | 점진적 저하         | EventLoop 블로킹 → 비동기 파이프라인으로 전환 효과 |
+
+
+__2) Reactive RabbitMQ 도입__
+
+| 항목              | In-Memory (단일 서버) | RabbitMQ (서버 2대) | 해석                          |
+| --------------- | ----------------- | ---------------- | --------------------------- |
+| E2E Startup     | 고부하 시 **22초 이상**  | **3초 내외 유지**     | 메시지 처리 부하가 서버 간 분산됨         |
+| Message Latency | 최대 **39초**        | **50ms 내외**      | 단일 JVM 메모리 큐 한계 → 브로커 기반 처리 |
+| 메시지 수신율         | **79%**           | **99.9%**        | 메시지 유실 위험 사실상 제거            |
+| 확장성             | 수직 확장 한계          | 수평 확장 가능         | 서버 증설만으로 처리량 확장 가능          |
+
+
+<br>
+
+#### 4. 상세 분석(Wiki)
+각 단계별 상세 설정 값, 그래프, 로그 분석, 튜닝 근거는 아래 문서에서 확인할 수 있습니다. <br>
+➡️ [Phase 3. RSocket 성능·아키텍처 개선](https://github.com/namoo36/MUNOVA-dev/wiki/Phase-3.-RSocket-%EC%84%B1%EB%8A%A5%C2%B7%EC%95%84%ED%82%A4%ED%85%8D%EC%B2%98-%EA%B0%9C%EC%84%A0) <br>
+➡️ [Full Report (Wiki)](https://github.com/namoo36/MUNOVA-dev/wiki) <br>
 
