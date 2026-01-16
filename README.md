@@ -89,7 +89,7 @@ __3) 애플리케이션 레벨 — 동시 연결 상한__
 
 <br>
 
-#### 3. 성능 개선 요약
+#### 3. 결과
 __1)TCP / Handshake 단계 성능 비교__
 - FD는 ‘연결 실패 제거’, TCP Backlog는 ‘지연 안정화’에 결정적 역할
 
@@ -130,5 +130,70 @@ __2) WebSocket 동시 연결 유지 한계 비교__
 
 <br> 
 
-### 1️⃣ TCP WebSocket 연결 처리 한계 검증
+### 2️⃣ STOMP(Servlet) vs RSocket(WebFlux·Netty) 메시지 처리 성능 비교
+
+#### 1. 목표
+WebSocket 기반 STOMP(Servlet) 구조와 `RSocket`(`WebFlux` + `Netty`) 구조의 메시지 처리 성능과 안정성을 검증했습니다. 최대 3,000 VUs 환경에서 1:1 채팅방 생성 → 메시지 전송 → DB 저장 → 수신 완료까지 `End-to-End` 흐름이 안정적으로 유지되는지 확인하고, 적합한 채팅 인프라 구조를 결정하는 것을 목표로 테스트를 진행했습니다.
+> 본 테스트에서 테스트 환경 및 동시 접속자 수 산정 기준은 [⚙️ 테스트 환경 및 성능 목표](https://github.com/namoo36/MUNOVA-dev/wiki/%EB%B6%80%ED%95%98%ED%85%8C%EC%8A%A4%ED%8A%B8-%EC%84%B1%EB%8A%A5-%EB%AA%A9%ED%91%9C-%EB%B0%8F-%ED%85%8C%EC%8A%A4%ED%8A%B8-%ED%99%98%EA%B2%BD) 문서의 기준을 따릅니다.
+<br>
+
+#### 2. 문제 상황 및 접근
+__1) 애플리케이션 레벨 — Servlet + STOMP 구조__
+- __문제__: 1,500 VUs 이상에서 `HTTP API` 실패율 급증
+- __원인__: `Thread-per-Request` 모델에서 DB I/O로 `Worker Thread` 장기 점유 → `Thread Pool` 고갈
+- __특징__: `WebSocket` 세션은 유지되나, 채팅방 생성/메시지 저장 API 실패
+
+__2) DB 레벨 — Blocking JDBC__
+- __문제__: `INSERT/UPDATE` 중심 트랜잭션 폭증
+- __원인__: `Connection Pool` 재사용 비효율 + `Lock` 경합
+- __결과__: 처리 지연이 `HTTP/API` 병목으로 확산
+
+__3) 구조적 한계 판단__
+- `Servlet` 기반 동기 처리 + `DB Write` 결합 구조가 병목의 근본 원인이라 판단
+- `STOMP` 프로토콜 프레임 구조로 인한 오버헤드 존재 
+
+__4) 접근__
+- __모델 전환(Servlet → WebFlux)__: HTTP 처리 모델을 Blocking Servlet → Non-Blocking Reactive Model로 전환
+- __메시징 프로토콜 전환(STOMP → RSocket)__: `Request/Response` · `Fire&Forget` · `Streaming` 을 모두 지원하는 메시징 모델로 전환
+- __세션 및 메시징 구조 재설계__: `RSocketRequester` 를 통해 사용자 별 세션 추적, 채팅방 단위 연결 관리, 개인 `Sink` 단위 메시지 제어가 가능하도록 재설계
+- __DB Layer 전환(JDBC → R2DBC)__: 동기 `Blocking JDBC` → 비동기 `Non-Blocking R2DBC` 로 전환
+
+<br>
+
+#### 3. 결과
+- `RSocket(Netty)` 구조 전환을 통해 동시 연결 수용 한계를 해소하고, 대규모 트래픽 환경에서도 안정적인 실시간 통신이 가능함을 수치로 검증했다.
+
+|   VUs | 항목                       | STOMP (WebSocket + Tomcat) | RSocket (Netty)         |
+| ----: | ------------------------ | -------------------------- | ----------------------- |
+| 1,000 | 요청/세션 성공률                | 100% (58,637/58,637)       | 100% (1,000/1,000)      |
+|       | 평균 API / Message Latency | 66.54 ms                   | 233.81 ms               |
+|       | Connect Time             | 14.45 ms                   | 0.194 ms                |
+|       | 처리 메시지 수                 | 58,637                     | 37,135 / 36,517         |
+|    |                       |                         |                      |
+| 1,500 | 요청/세션 성공률                | **58.64%** (실패 41.36%)     | **99.6%** (1,494/1,500) |
+|       | 평균 API / Message Latency | **3.14 s**                 | 478.85 ms               |
+|       | Connect Time             | 261.32 ms                  | 0.228 ms                |
+|       | 처리 메시지 수                 | 78,817 / 78,867            | 129,434 / 114,210       |
+|    |                       |                         |                      |
+| 2,000 | 요청/세션 성공률                | **21.02%** (실패 78.98%)     | **99.6%** (1,992/2,000) |
+|       | 평균 API / Message Latency | 106.98 ms                  | **7,697.79 ms**         |
+|       | Connect Time             | 91.56 ms                   | 0.109 ms                |
+|       | 처리 메시지 수                 | 116,135 / 116,135          | 129,583 / 64,706        |
+|    |                       |                         |                      |
+| 3,000 | 요청/세션 성공률                | 측정 불가                    | **99.6%** (2,988/3,000) |
+|       | 평균 Message Latency       | 측정 불가                           | 225.63 ms               |
+|       | Connect Time             | 측정 불가                         | 0.091 ms                |
+|       | 처리 메시지 수                 | 측정 불가                           | 238,815 / 160,558       |
+|       | E2E Startup              | -                        | 3,088 ms                |
+
+<br>
+
+#### 4. 상세 분석(Wiki)
+각 단계별 상세 설정 값, 그래프, 로그 분석, 튜닝 근거는 아래 문서에서 확인할 수 있습니다. <br>
+➡️ [Phase 2. RSocket(Netty) vs STOMP(Tomcat) 비교]([https://github.com/namoo36/MUNOVA-dev/wiki/Phase-1.-Websocket(STOMP)-%EB%8F%99%EC%8B%9C-%EC%A0%91%EC%86%8D-%EB%B6%80%ED%95%98-%ED%85%8C%EC%8A%A4%ED%8A%B8-%EB%B6%84%EC%84%9D](https://github.com/namoo36/MUNOVA-dev/wiki/Phase-2.-RSocket(Netty)-vs-STOMP(Tomcat)-%EB%B9%84%EA%B5%90)) <br>
+➡️ [Full Report (Wiki)](https://github.com/namoo36/MUNOVA-dev/wiki) <br>
+
+<br>
+
+### 3️⃣ 
 
