@@ -62,7 +62,11 @@ https://github.com/user-attachments/assets/be7f5f32-c950-4ba2-8c1e-5a72432e98bc
 https://github.com/user-attachments/assets/0afa1370-1b5d-48d5-92e6-140b6862c5cb
 </details>
 
-<br/><br/>
+✅ __CI/CD·운영 인프라 구축__
+- 채팅 서버 기존 API 서버와 분리, 실시간 트래픽 격리 및 안정성 확보
+- Jenkins CI/CD 기반 자동 배포 파이프라인 구축, Discord 알림 연동
+
+<br/>
 
 ## ⚒️ 채팅 기능 단계적 고도화
 ### 1️⃣ TCP WebSocket 연결 처리 한계 검증
